@@ -6,7 +6,7 @@ export const onRequestPost = async (context) => {
   // 1. 检查 API Key 是否配置
   if (!env.GEMINI_API_KEY) {
     return new Response(
-      JSON.stringify({ error: "GEMINI_API_KEY is not configured in Cloudflare Dashboard." }),
+      JSON.stringify({ error: "GEMINI_API_KEY is not configured in Cloudflare Dashboard. Please add it to Settings -> Functions -> Environment variables." }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
@@ -14,26 +14,35 @@ export const onRequestPost = async (context) => {
   try {
     const { topic, keyPoints, systemPrompt, userQuery } = await request.json();
 
-    const ai = new GoogleGenAI(env.GEMINI_API_KEY);
-    // 注意：在 Cloudflare 环境中，模型调用方式略有不同，建议使用 gemini-1.5-flash 或类似稳定版本
-    // 这里保持与你之前一致，但如果报错，请尝试更换模型名称
-    const model = ai.getGenerativeModel({ 
-      model: "gemini-1.5-flash", // Cloudflare 环境下建议使用更稳定的名称
-      systemInstruction: systemPrompt 
+    // 正确的初始化方式：必须使用 { apiKey: ... }
+    const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+    
+    // 使用最新的 generateContent 调用方式
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview", // 或者 "gemini-1.5-flash"
+      contents: userQuery,
+      config: {
+        systemInstruction: systemPrompt,
+        tools: [{ googleSearch: {} }]
+      }
     });
 
-    const result = await model.generateContent(userQuery);
-    const response = await result.response;
-    const contentText = response.text();
+    const contentText = response.text || '';
+    
+    // 提取搜索溯源信息
+    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    const groundingSources = groundingChunks?.map((chunk: any) => ({
+      uri: chunk.web?.uri || '',
+      title: chunk.web?.title || '引用来源'
+    })).filter((s: any) => s.uri) || [];
 
-    // 处理来源（Grounding）在 Cloudflare 环境下可能需要根据 SDK 版本调整
-    // 简便起见，先返回核心文本
     return new Response(
-      JSON.stringify({ text: contentText, sources: [] }),
+      JSON.stringify({ text: contentText, sources: groundingSources }),
       { headers: { "Content-Type": "application/json" } }
     );
 
-  } catch (error) {
+  } catch (error: any) {
+    console.error("Gemini API Error:", error);
     return new Response(
       JSON.stringify({ error: error.message || "Failed to generate content" }),
       { status: 500, headers: { "Content-Type": "application/json" } }
