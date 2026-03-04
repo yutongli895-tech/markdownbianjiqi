@@ -17,29 +17,37 @@ export const onRequestPost = async (context) => {
     // 正确的初始化方式：必须使用 { apiKey: ... }
     const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
     
-    // 尝试使用 gemini-1.5-flash-latest，这是兼容性最好的别名
-    // 如果失败，会自动捕获并尝试备选模型
+    // 尝试模型顺序：1.5-flash-latest -> 1.5-flash-8b -> 2.0-flash
     let response;
-    try {
-      response = await ai.models.generateContent({
-        model: "gemini-1.5-flash-latest", 
-        contents: userQuery,
-        config: {
-          systemInstruction: systemPrompt,
-          tools: [{ googleSearch: {} }]
+    const modelsToTry = ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b", "gemini-2.0-flash"];
+    let lastError: any = null;
+
+    for (const modelName of modelsToTry) {
+      try {
+        response = await ai.models.generateContent({
+          model: modelName, 
+          contents: userQuery,
+          config: {
+            systemInstruction: systemPrompt,
+            tools: [{ googleSearch: {} }]
+          }
+        });
+        if (response) break; // 成功获取响应，跳出循环
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Model ${modelName} failed:`, err.message);
+        // 如果是配额错误，继续尝试下一个模型
+        if (err.message?.includes("429") || err.message?.includes("quota")) {
+          continue;
         }
-      });
-    } catch (firstError) {
-      console.warn("Primary model failed, trying fallback:", firstError);
-      // 备选方案：使用最新的 2.0 Flash 模型
-      response = await ai.models.generateContent({
-        model: "gemini-2.0-flash", 
-        contents: userQuery,
-        config: {
-          systemInstruction: systemPrompt,
-          tools: [{ googleSearch: {} }]
-        }
-      });
+        // 如果是其他致命错误，直接抛出
+        throw err;
+      }
+    }
+
+    if (!response) {
+      const errorMsg = lastError?.message || "未知错误";
+      throw new Error(`所有模型均无法响应。最后一次尝试的模型报错: ${errorMsg}`);
     }
 
     const contentText = response.text || '';
