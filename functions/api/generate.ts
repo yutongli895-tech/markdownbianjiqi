@@ -17,15 +17,30 @@ export const onRequestPost = async (context) => {
     // 正确的初始化方式：必须使用 { apiKey: ... }
     const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
     
-    // 切换到更稳定的 gemini-1.5-flash 模型，它的免费配额通常更高
-    const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash", 
-      contents: userQuery,
-      config: {
-        systemInstruction: systemPrompt,
-        tools: [{ googleSearch: {} }]
-      }
-    });
+    // 尝试使用 gemini-1.5-flash-latest，这是兼容性最好的别名
+    // 如果失败，会自动捕获并尝试备选模型
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: "gemini-1.5-flash-latest", 
+        contents: userQuery,
+        config: {
+          systemInstruction: systemPrompt,
+          tools: [{ googleSearch: {} }]
+        }
+      });
+    } catch (firstError) {
+      console.warn("Primary model failed, trying fallback:", firstError);
+      // 备选方案：使用最新的 2.0 Flash 模型
+      response = await ai.models.generateContent({
+        model: "gemini-2.0-flash", 
+        contents: userQuery,
+        config: {
+          systemInstruction: systemPrompt,
+          tools: [{ googleSearch: {} }]
+        }
+      });
+    }
 
     const contentText = response.text || '';
     
