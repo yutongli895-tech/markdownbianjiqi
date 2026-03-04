@@ -110,11 +110,32 @@ export const onRequestPost = async (context) => {
       title: chunk.web?.title || '引用来源'
     })).filter((s: any) => s.uri) || [];
 
+    // --- D1 数据库持久化 (如果已绑定) ---
+    const articleId = Date.now().toString();
+    if (env.DB) {
+      try {
+        await env.DB.prepare(
+          "INSERT INTO articles (id, topic, content, sources, cover_image) VALUES (?, ?, ?, ?, ?)"
+        ).bind(
+          articleId,
+          topic,
+          contentText,
+          JSON.stringify(groundingSources),
+          coverImage
+        ).run();
+        console.log("Article saved to D1 database");
+      } catch (dbErr) {
+        console.error("D1 Save Error:", dbErr);
+      }
+    }
+
     return new Response(
       JSON.stringify({ 
+        id: articleId,
         text: contentText, 
         sources: groundingSources,
-        coverImage: coverImage 
+        coverImage: coverImage,
+        isCloudSaved: !!env.DB
       }),
       { headers: { "Content-Type": "application/json" } }
     );

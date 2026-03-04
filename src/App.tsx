@@ -20,6 +20,7 @@ import {
   Quote,
   History,
   Trash2,
+  X,
   ChevronRight,
   Sparkles
 } from 'lucide-react';
@@ -100,21 +101,86 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Load history from localStorage
+  // Load history from localStorage or D1
   useEffect(() => {
-    const saved = localStorage.getItem('insight_scribe_history');
-    if (saved) {
+    const fetchHistory = async () => {
       try {
-        setHistory(JSON.parse(saved));
+        const response = await fetch('/api/history');
+        const data = await response.json();
+        if (data.history && data.isCloud) {
+          setHistory(data.history);
+          console.log("Loaded history from Cloud D1");
+          return;
+        }
       } catch (e) {
-        console.error("Failed to parse history", e);
+        console.warn("Failed to fetch cloud history, falling back to local", e);
       }
-    }
+
+      // Fallback to local storage
+      const saved = localStorage.getItem('insight_scribe_history');
+      if (saved) {
+        try {
+          setHistory(JSON.parse(saved));
+        } catch (e) {
+          console.error("Failed to parse history", e);
+          localStorage.removeItem('insight_scribe_history');
+        }
+      }
+    };
+
+    // Global error listener for QuotaExceededError
+    const handleGlobalError = (event: ErrorEvent) => {
+      if (event.error && (event.error.name === 'QuotaExceededError' || event.error.message?.includes('quota'))) {
+        console.warn("Global QuotaExceededError caught, clearing history...");
+        localStorage.removeItem('insight_scribe_history');
+        setHistory([]);
+        showToast("存储空间已满，已重置历史记录");
+        event.preventDefault();
+      }
+    };
+    window.addEventListener('error', handleGlobalError);
+
+    fetchHistory();
+    return () => window.removeEventListener('error', handleGlobalError);
   }, []);
 
-  // Save history to localStorage
+  // Save history to localStorage with quota handling
+  const lastSaveAttempt = useRef<number>(0);
   useEffect(() => {
-    localStorage.setItem('insight_scribe_history', JSON.stringify(history));
+    // Prevent rapid fire saves if we are in a trimming loop
+    const now = Date.now();
+    if (now - lastSaveAttempt.current < 100) return;
+    lastSaveAttempt.current = now;
+
+    try {
+      localStorage.setItem('insight_scribe_history', JSON.stringify(history));
+    } catch (e: any) {
+      // More inclusive check for quota errors
+      const isQuotaError = 
+        e.name === 'QuotaExceededError' || 
+        e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        e.code === 22 || 
+        e.code === 1014 ||
+        (e.message && e.message.includes('quota'));
+
+      if (isQuotaError) {
+        console.warn("Storage quota exceeded, aggressively trimming history...");
+        if (history.length > 1) {
+          // Keep only the latest item
+          setHistory(prev => prev.slice(0, 1));
+        } else if (history.length === 1 && history[0].coverImage) {
+          // Even one item with image is too much? Remove image.
+          setHistory(prev => [{ ...prev[0], coverImage: null }]);
+        } else {
+          // Absolute fallback: clear it
+          localStorage.removeItem('insight_scribe_history');
+          setHistory([]);
+        }
+        showToast("存储空间不足，已自动清理旧记录");
+      } else {
+        console.error("LocalStorage save error:", e);
+      }
+    }
   }, [history]);
 
   const showToast = (text: string) => {
@@ -182,15 +248,27 @@ export default function App() {
         
         // Add to history
         const newArticle: Article = {
-          id: Date.now().toString(),
+          id: result.id || Date.now().toString(),
           topic,
           content: contentText,
           sources: groundingSources,
           coverImage: generatedCover,
           date: now
         };
-        setHistory(prev => [newArticle, ...prev.slice(0, 9)]);
-        showToast("创作完成，文稿已成。");
+        
+        // If saved to cloud, we might want to refresh history from server
+        if (result.isCloudSaved) {
+          // Fetch fresh history from server
+          fetch('/api/history')
+            .then(res => res.json())
+            .then(data => {
+              if (data.history) setHistory(data.history);
+            });
+        } else {
+          // Limit history to 5 items to save space locally
+          setHistory(prev => [newArticle, ...prev.slice(0, 4)]);
+        }
+        showToast(result.isCloudSaved ? "创作完成，已同步云端。" : "创作完成，文稿已成。");
       } else {
         throw new Error("模型未能生成有效文稿，请重试。");
       }
@@ -247,8 +325,20 @@ export default function App() {
     setShowHistory(false);
   };
 
-  const deleteHistoryItem = (id: string, e: React.MouseEvent) => {
+  const deleteHistoryItem = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    
+    // Try cloud delete first
+    try {
+      const res = await fetch(`/api/history?id=${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setHistory(prev => prev.filter(item => item.id !== id));
+        return;
+      }
+    } catch (err) {
+      console.warn("Cloud delete failed, falling back to local", err);
+    }
+
     setHistory(prev => prev.filter(item => item.id !== id));
   };
 
@@ -327,7 +417,7 @@ export default function App() {
           )}
         </div>
 
-        <div className="p-4 border-t border-black/5">
+        <div className="p-4 border-t border-black/5 space-y-2">
           <button 
             onClick={() => setShowHistory(!showHistory)}
             className="w-full flex items-center justify-between px-4 py-3 hover:bg-black/5 rounded-lg transition-colors text-xs font-bold text-black/60"
@@ -337,6 +427,19 @@ export default function App() {
               历史创作
             </div>
             <span className="bg-black/5 px-2 py-0.5 rounded-full">{history.length}</span>
+          </button>
+          
+          <button 
+            onClick={() => {
+              if (confirm("确定要重置应用吗？这将清空所有本地缓存和历史记录。")) {
+                localStorage.clear();
+                window.location.reload();
+              }
+            }}
+            className="w-full flex items-center gap-2 px-4 py-2 hover:bg-red-50 text-red-400 rounded-lg transition-colors text-[10px] font-bold uppercase tracking-widest"
+          >
+            <AlertCircle className="w-3 h-3" />
+            重置应用
           </button>
         </div>
       </aside>
@@ -454,9 +557,33 @@ export default function App() {
               className="absolute inset-0 z-50 bg-paper/95 backdrop-blur-xl p-12 flex flex-col"
             >
               <div className="flex justify-between items-center mb-12">
-                <h2 className="text-3xl font-serif font-black tracking-tight">历史创作</h2>
-                <button onClick={() => setShowHistory(false)} className="p-3 hover:bg-black/5 rounded-full transition-colors">
-                  <Trash2 className="w-6 h-6 text-black/20" />
+                <div className="flex items-center gap-4">
+                  <h2 className="text-3xl font-serif font-black tracking-tight">历史创作</h2>
+                  <button 
+                    onClick={async () => {
+                      if (confirm("确定要清空所有历史记录吗？")) {
+                        try {
+                          await fetch('/api/history?id=all', { method: 'DELETE' });
+                        } catch (e) {
+                          console.warn("Cloud clear failed", e);
+                        }
+                        setHistory([]);
+                        localStorage.removeItem('insight_scribe_history');
+                        showToast("历史记录已清空");
+                      }
+                    }} 
+                    className="p-3 hover:bg-red-50 rounded-full transition-colors group"
+                    title="清空历史"
+                  >
+                    <Trash2 className="w-6 h-6 text-black/20 group-hover:text-red-500 transition-colors" />
+                  </button>
+                </div>
+                <button 
+                  onClick={() => setShowHistory(false)} 
+                  className="p-3 hover:bg-black/5 rounded-full transition-colors"
+                  title="关闭"
+                >
+                  <X className="w-6 h-6 text-black/40" />
                 </button>
               </div>
               
